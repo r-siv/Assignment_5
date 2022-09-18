@@ -1,0 +1,290 @@
+---
+title: "Assignment 5"
+author: "Raam Sivakumar"
+date: "23/12/2021"
+output: pdf_document
+always_allow_html: true
+---
+
+```{r setup, include=FALSE, eval=TRUE}
+knitr::opts_chunk$set(echo=TRUE,warning=FALSE,message=FALSE,error=FALSE)
+#allows for chunks with duplciate names
+options(knitr.duplicate.label = "allow")
+```
+# Introduction
+
+This paper looks at theme 11 Gene Expression Analysis: Systems Biology. Systems biology is an integrative field which is currently very relevant in terms of interpreting genomic datasets. It allows for an overarching view of molecular diversity for a biological system (Breitling, 2010). Looking through a systems biology lens, gene expression can be viewed as a dynamic process which can be modelled visually through networks.
+
+The background of this paper is based on a 2014 research article which looks at transcriptome profiling of human airway smooth muscle cells (ASM) treated with dexamethasone which is a glucocorticoid (GC) steroid hormone (Himes et al., 2014). This is quite relevant as GCs are currently used to suppress inflammation in patients affected by autoimmune diseases like rheumatoid arthritis, allergies, or chronic illnesses like asthma. Asthma in particular causes ASM cells to excessively contract and results in bronchoconstriction. It is still unclear what molecular mechanisms are involved with the GC-ASM complex and how GCs activate GC receptors on ASM cells. Through gene expression analysis, further insight can be gained on the GC-ASM complex.
+
+The objective of this paper was to perform an exploratory analysis on the set of differentially expressed genes from the ASM paper. Sets of overrepresented and underrepresented genes were found and any pathogenic-related pathways were also to be noted. The distribution of functional enrichment terms was also visualized and differences between untreated and treated samples were observed. Through this systems-wide approach, further information could be gained into specifically expressed genes that may be involved with inflammation and airway hyperresponsiveness.
+
+# Dataset
+
+The dataset being used is from an RNA-SEQ experiment. It is from the “airway” R package and contains a raw read count expression matrix which all analysis was performed from. The matrix was preprocessed using bam files from the GEO database with id GSE52778 (Himes et al., 2014). The dataset was loaded through RStudio’s “library” function. There are 64102 genes (rows), 3 types of cell lines and 8 samples (columns). The samples are further grouped into untreated (control) and treated (dexamethasone) groups.
+
+# Code Section 1
+## Loading Packages
+
+```{r install packages}
+#if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+#BiocManager::install(version = "3.15")
+#BiocManager::install("airway")
+#BiocManager::install("DESeq2")
+#install.packages("tidyverse")
+#install.packages("pheatmap")
+#BiocManager::install("AnnotationDbi")
+#BiocManager::install("org.Hs.eg.db")
+#BiocManager::install("biomaRt")
+#install.packages("gprofiler2")
+#install.packages("pathfindR")
+#BiocManager::install("KEGGREST")
+#BiocManager::install("KEGGgraph")
+```
+
+```{r load packages}
+library("knitr")
+library("airway")
+library("DESeq2")
+library("dplyr")
+library("ggplot2")
+library("ggrepel")
+library("pheatmap")
+library("AnnotationDbi")
+library("org.Hs.eg.db")
+library("biomaRt")
+library("gprofiler2")
+library("pathfindR")
+library("KEGGREST")
+library("KEGGgraph")
+```
+## Preprocessing data
+```{r preprocessing}
+#loading raw data from airway package
+#checking raw data and converting into data frame for downstream use
+raw_data=data(airway)
+mode(assay(airway))
+count_table = as.data.frame(assay(airway))
+dim(count_table)
+class(count_table)
+length(count_table)
+names(count_table)
+#loading group/label data from airway package
+#checking and converting into data frame for downstream use
+mode(colData(airway))
+group_table = as.data.frame(colData(airway))
+dim(group_table)
+class(group_table)
+length(group_table)
+names(group_table)
+```
+```{r preprocessing tables}
+head(count_table)
+summary(count_table)
+group_table
+```
+## Data filtering
+```{r data filtering}
+#constructing count table data frame
+#column containing ensembl genes is titled ensgene
+count_table = cbind(rownames(count_table),count_table)
+rownames(count_table) = NULL
+colnames(count_table) = c(names(count_table))
+names(count_table)[names(count_table) == 'rownames(count_table)'] = 'ensgene'
+#constructing group/label table data frame
+#column containing samples is titled sample_id
+group_table <- cbind(rownames(group_table),group_table)
+rownames(group_table) <- NULL
+colnames(group_table) <- c(names(group_table))
+names(group_table)[names(group_table) == 'rownames(group_table)'] = 'sample_id'
+#remove all rows in count table that do not have at least 1 non-zero value
+count_table = count_table[apply(count_table[,-1], 1,
+                                function(x) !all(x==0)),]
+```
+```{r data filtering tables}
+head(count_table)
+head(group_table)
+```
+## Summary statistics
+```{r summary statistics}
+#mean table constructed from count table
+#mean table shows mean values for each gene across all samples
+#values are log2 transformed and fold changes are calculated
+#values are also grouped by sample type (untreated and treated)
+#mean table is also filtered of any rows containing any zero values
+mean_table = count_table %>%
+  mutate(mean_control = SRR1039508+SRR1039512+SRR1039516+SRR1039520) %>%
+  mutate(mean_treated = SRR1039509+SRR1039513+SRR1039517+SRR1039521) %>%
+  mutate(log2_fold_change=log2(mean_treated/mean_control)) %>%
+  filter(mean_control>0 & mean_treated>0) %>%
+  dplyr::select(ensgene,mean_control,mean_treated,log2_fold_change)
+#upregulated gene table constructed
+#rows containing fold changes above 2 are kept
+mean_table_upreg = mean_table %>% filter(log2_fold_change>2)
+cat(length(mean_table_upreg$ensgene),"upregulated genes")
+#downregulated gene table constructed
+#rows containing fold changes below -2 are kept
+mean_table_downreg = mean_table %>% filter(log2_fold_change<(-2))
+cat(length(mean_table_downreg$ensgene),"downregulated genes")
+```
+```{r summary statistics tables}
+head(mean_table)
+summary(mean_table)
+head(mean_table_upreg)
+head(mean_table_downreg)
+```
+## Running DE analysis
+```{r running DE}
+#DESeq object generated from count data
+#columns labelled by group table
+deseq_object = DESeqDataSetFromMatrix(countData=count_table, 
+                                      colData=group_table, 
+                                      design=~dex, tidy = TRUE)
+#filter DESeq object against rows containing less than 100 counts
+threshold = rowSums(counts(deseq_object)) >= 100
+deseq_object = deseq_object[threshold,]
+#add control reference factor to DESeq object for log2 fold change calculation
+#DESeq analysis is run
+deseq_object@colData$dex = relevel(deseq_object@colData$dex, ref = "untrt")
+deseq_object = DESeq(deseq_object)
+#save results to variable for downstream use
+output = results(deseq_object)
+summary(output)
+#order output table by p-value
+output = output[order(output$pvalue),]
+output$gene = rownames(output)
+output = as_tibble(output)
+#add additional column displaying whether gene/row is significant or not
+output = output %>% mutate(output, Significance=padj<0.05)
+```
+```{r running DE tables}
+head(output)
+```
+```{r visualizing DE results, fig.cap="Volcano plot of Differentially Expressed Genes"}
+#plot volcano plot of DE genes
+output %>% ggplot(aes(log2FoldChange, -log10(pvalue), col=Significance)) + 
+  geom_point() +
+  geom_vline(xintercept=c(-0.1, 0.1), col="black") +
+  geom_hline(yintercept=-log10(0.05), col="black")
+```
+```{r visualizing DE results2, fig.cap="Heatmap of Differentially Expressed Genes"}
+#normal transformation
+normal = normTransform(deseq_object)
+#select 30 normalized mean values in decreasing order
+selection = order(rowMeans(counts(deseq_object,normalized=TRUE)),
+                decreasing=TRUE)[1:30]
+#obtain sample type from group table for clustering heatmap columns
+grouping_frame = as.data.frame(group_table$dex)
+rownames(grouping_frame) = colnames(normal)
+colnames(grouping_frame)[1] = "sample type"
+#plot heatmap of normalized DE genes
+pheatmap(assay(normal)[selection,], cluster_rows=TRUE, show_rownames=TRUE,
+         cluster_cols=TRUE, annotation_col=grouping_frame)
+```
+# Main Software Tool
+
+The main tools being used include DESeq2 for performing differential gene expression (Love, Huber, & Anders, 2014). Annotation was done with biomaRT (Durinck, Spellman, Birney, & Huber, 2009). Primary pathway analysis was done with pathfindR (Ulgen, Ozisik, & Sezerman, 2019). Additional functional enrichment was performed with gprofiler2 (Peterson, Kolberg, Raudvere, Kuzmin, & Vilo, 2020). DESeq was used because it internally normalizes count data, corrects for library size, and assumes the genes are not differentially expressed. It also runs relatively quickly and is very sensitive to small sample sizes. It also maintains its false positive rate near 5% (Schurch et al., 2016). The alternatives like limma-voom are better for larger datasets with more replicates (Dillies et al., 2013). pathfindR was used as it finds subnetworks between genes as well as performs enrichment analysis (Ulgen et al., 2019). The “Analyzing RNA-seq data with DESeq2” vignette and pathfindR website were both heavily used in this paper. Their main workflows were followed with slight changes such as different normalization steps being taken and KEGG sets being used for enrichment.
+
+# Code section 2
+## Annotations
+```{r annotation}
+#remove rows with NA significance
+output = output[!is.na(output$padj),]
+#new data frame with only significant genes
+SigGene = output[output$Significance == TRUE,]
+cat(nrow(SigGene),"significant genes")
+#creating annotated table from biomaRt package using ensembl id as reference 
+#gene symbols obtained from human gene database
+genes <- getBM(filters= "ensembl_gene_id", attributes= c("ensembl_gene_id","hgnc_symbol"),values=SigGene$gene,
+               mart= useDataset("hsapiens_gene_ensembl", useMart("ensembl")))
+#merging significant gene data frame with gene symbol data frame for downstream use
+final_table = merge(SigGene,genes,by.x="gene",by.y="ensembl_gene_id")
+colnames(genes)[1] = "gene"
+final_table = merge(SigGene,genes, by="gene")
+ensembl = useMart("ensembl",dataset="hsapiens_gene_ensembl")
+#creating separate annotation table with just ensembl ids and gene symbols 
+#this gene list is to be used for profiling with gprofiler2 package
+gene_list = getBM(attributes='hgnc_symbol',
+   filters = 'ensembl_gene_id',
+   values = SigGene$gene,
+   mart = ensembl)
+```
+```{r annotation tables}
+head(final_table)
+head(gene_list)
+```
+## Enrichment Analysis
+```{r enrichment analysis, message=FALSE,warning=FALSE}
+#running gost object for profiling significant genes and terms
+functional_overprofile = gost(query = gene_list$hgnc_symbol,
+                         organism = "hsapiens")
+#subsetting final DE count table with only gene symbol, log2fc and p-value columns
+subtable = final_table[,c("hgnc_symbol","log2FoldChange","pvalue")]
+#running pathfindR on subtable for KEGG pathways
+output_table = run_pathfindR(subtable,gene_sets = "KEGG", 
+                             plot_enrichment_chart=FALSE)
+```
+```{r enrichment analysis tables}
+head(subtable)
+head(output_table)
+```
+```{r visualizing enrichment results, fig.cap="Functional Profile of Airway Gene lists"}
+#plotting gost object
+gostplot(functional_overprofile, capped = TRUE, interactive = FALSE)
+#tabulating selected terms
+publish_gosttable(functional_overprofile,
+                  highlight_terms = c("GO:0019899",
+                                      "GO:0012505",
+                                      "GO:0048518",
+                                      "KEGG:04218",
+                                      "REAC:R-HSA-9006934",
+                                      "TF:M10086"))
+```
+```{r visualizing enrichment results2, fig.cap="Enrichment Chart Summary of Airway Genes"}
+#plotting enrichment chart of top 7 enriched terms
+enrichment_chart(result_df = output_table, top_terms = 7)
+```
+```{r visualizing enrichment results3, fig.cap="Gene Network of Airway Genes and Terms"}
+#creating gene network for genes and top enriched terms
+graph = term_gene_graph(result_df = output_table, use_description = TRUE, num_terms = 7)
+#coloring gene graph colors
+graph = graph+scale_colour_manual(values = c("darkgreen", "red", "blue"),
+                                  labels = c("enriched term",
+                                             "up-regulated gene",
+                                             "down-regulated gene"))
+graph
+```
+# Discussion
+
+The obtained results were quite interesting but also expected as there were many sets of differentially expressed genes and pathways. After removing low expressed genes (less than 100 counts/sample) there were 343 upregulated genes and 549 downregulated genes. DE analysis showed 2781 significant genes as visualized in the volcano plot. The heatmap showed 30 normalized significant genes compared between treated and untreated samples where many treated genes showed downregulation and untreated genes showed upregulation. The Manhattan plot shows functional terms grouped together with most terms from this dataset either being biological process terms or transcription factor terms. Cellular senescence was seen to have high fold enrichment from the enrichment chart which is also shown to be affiliated with chronic lung diseases (Wang et al., 2020). The most enriched term as seen in the gene graph was the MAPK signalling pathway which featured many upregulated genes like DUSP1 and DUSP3 which the original paper also described seeing (Himes et al., 2014). MAPK is also known to be involved in inflammatory factor responses in asthma (Athari, 2019).
+
+Some limitations of this paper include the variability of the obtained annotations. Occasionally, some ensembl mirrors were unresponsive and different gene annotations were used. During a previous run of this script, different enriched terms were obtained including small cell lung cancer which included associated genes like cyclin-dependent kinases and kinase inhibitors. This could be a result of the difference in annotations or a different reason entirely.
+
+Areas of improvement include using and comparing the results with another DE method like limma-voom to improve runtime. Using multiple annotation database sources and finding common annotations would improve the accuracy and resolve downstream analysis. Additionally, more pathway databases other than KEGG could be used to enrich the datasets for more pathway analysis. The annotation files also do not include non-coding RNA or mRNA isoforms so certain variants were most likely missed. The next steps of this project would be to look at specific SNP studies of the significantly upregulated genes to further gain insight into the mechanisms behind GC receptors and ASM cells.
+
+# Acknowledgements
+
+Attended both help sessions.
+
+# References
+
+Athari, S. S. (2019). Targeting cell signaling in allergic asthma. Signal Transduction and Targeted Therapy 2019 4:1, 4(1), 1–19. https://doi.org/10.1038/s41392-019-0079-0
+
+Breitling, R. (2010). What is Systems Biology? Frontiers in Physiology, 1(1). https://doi.org/10.3389/FPHYS.2010.00009
+
+Dillies, M. A., Rau, A., Aubert, J., Hennequet-Antier, C., Jeanmougin, M., Servant, N., … Jaffrézic, F. (2013). A comprehensive evaluation of normalization methods for Illumina high-throughput RNA sequencing data analysis. Briefings in Bioinformatics, 14(6), 671–683. https://doi.org/10.1093/BIB/BBS046
+
+Durinck, S., Spellman, P. T., Birney, E., & Huber, W. (2009). Mapping identifiers for the integration of genomic datasets with the R/Bioconductor package biomaRt. Nature Protocols 2009 4:8, 4(8), 1184–1191. https://doi.org/10.1038/nprot.2009.97
+
+Himes, B. E., Jiang, X., Wagner, P., Hu, R., Wang, Q., Klanderman, B., … Lu, Q. (2014). RNA-Seq Transcriptome Profiling Identifies CRISPLD2 as a Glucocorticoid Responsive Gene that Modulates Cytokine Function in Airway Smooth Muscle Cells. PLOS ONE, 9(6), e99625. https://doi.org/10.1371/JOURNAL.PONE.0099625
+
+Love, M. I., Huber, W., & Anders, S. (2014). Moderated estimation of fold change and dispersion for RNA-seq data with DESeq2. Genome Biology, 15(12), 1–21. https://doi.org/10.1186/S13059-014-0550-8/FIGURES/9
+
+Peterson, H., Kolberg, L., Raudvere, U., Kuzmin, I., & Vilo, J. (2020). gprofiler2 -- an R package for gene list functional enrichment analysis and namespace conversion toolset g:Profiler. F1000Research 2020 9:709, 9, 709. https://doi.org/10.12688/f1000research.24956.2
+
+Schurch, N. J., Schofield, P., Gierliński, M., Cole, C., Sherstnev, A., Singh, V., … Barton, G. J. (2016). How many biological replicates are needed in an RNA-seq experiment and which differential expression tool should you use? RNA, 22(6), 839–851. https://doi.org/10.1261/RNA.053959.115/-/DC1
+
+Ulgen, E., Ozisik, O., & Sezerman, O. U. (2019). PathfindR: An R package for comprehensive identification of enriched pathways in omics data through active subnetworks. Frontiers in Genetics, 10(SEP), 858. https://doi.org/10.3389/FGENE.2019.00858/BIBTEX
+
+Wang, Z. N., Su, R. N., Yang, B. Y., Yang, K. X., Yang, L. F., Yan, Y., & Chen, Z. G. (2020). Potential Role of Cellular Senescence in Asthma. Frontiers in Cell and Developmental Biology, 8, 59. https://doi.org/10.3389/FCELL.2020.00059/BIBTEX
